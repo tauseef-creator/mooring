@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/table"
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
@@ -59,7 +60,8 @@ type tickMsg struct{ gen int }
 
 type model struct {
 	table   table.Model
-	rows    []row
+	all     []row // every listening port from the last scan
+	rows    []row // the rows shown: all, narrowed by the filter
 	hidden  bool
 	warning error
 	err     error
@@ -69,6 +71,9 @@ type model struct {
 	height  int
 
 	showDetails bool // false when the window is too short for the panel
+
+	filter    textinput.Model
+	filtering bool // the filter input has focus
 }
 
 func runTUI() int {
@@ -83,7 +88,15 @@ func newModel() model {
 	styles := table.DefaultStyles()
 	styles.Header = styles.Header.Foreground(lipgloss.Color("8"))
 	styles.Selected = styles.Selected.Foreground(lipgloss.Color("0")).Background(lipgloss.Color("6"))
-	return model{table: table.New(table.WithFocused(true), table.WithStyles(styles))}
+
+	filter := textinput.New()
+	filter.Prompt = "/ "
+	filter.Placeholder = "filter by port, command, project, container…"
+
+	return model{
+		table:  table.New(table.WithFocused(true), table.WithStyles(styles)),
+		filter: filter,
+	}
 }
 
 func scanCmd() tea.Msg {
@@ -107,8 +120,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
+		if m.filtering {
+			return m.updateFilter(msg)
+		}
 		switch msg.String() {
-		case "q", "esc", "ctrl+c":
+		case "/":
+			m.filtering = true
+			m.table.Blur() // so letters go to the filter, not table shortcuts
+			return m, m.filter.Focus()
+		case "esc":
+			if m.filter.Value() != "" {
+				m.clearFilter()
+				return m, nil
+			}
+			return m, tea.Quit
+		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "r":
 			return m, scanCmd
@@ -137,24 +163,67 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// setRows replaces the rows, keeping the cursor on the same port if it is
-// still listening.
-func (m *model) setRows(rows []row, hidden bool) {
-	var selected uint16
-	if c := m.table.Cursor(); c >= 0 && c < len(m.rows) {
-		selected = m.rows[c].Port
+// updateFilter handles a key while the filter input has focus.
+func (m model) updateFilter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "enter":
+		m.stopFiltering()
+		return m, nil
+	case "esc":
+		m.clearFilter()
+		return m, nil
+	case "up":
+		m.table.MoveUp(1)
+		return m, nil
+	case "down":
+		m.table.MoveDown(1)
+		return m, nil
 	}
-	m.rows, m.hidden = rows, hidden
+	var cmd tea.Cmd
+	m.filter, cmd = m.filter.Update(msg)
+	m.applyFilter()
+	return m, cmd
+}
 
-	trows := make([]table.Row, len(rows))
+func (m *model) stopFiltering() {
+	m.filtering = false
+	m.filter.Blur()
+	m.table.Focus()
+}
+
+func (m *model) clearFilter() {
+	m.filter.SetValue("")
+	m.stopFiltering()
+	m.applyFilter()
+}
+
+// setRows replaces the scanned rows and reapplies the filter.
+func (m *model) setRows(rows []row, hidden bool) {
+	m.all, m.hidden = rows, hidden
+	m.applyFilter()
+}
+
+// applyFilter shows the rows matching the filter, keeping the cursor on the
+// same port if it is still shown.
+func (m *model) applyFilter() {
+	var selected uint16
+	if r, ok := m.selected(); ok {
+		selected = r.Port
+	}
+	m.rows = filterRows(m.all, m.filter.Value())
+
+	trows := make([]table.Row, len(m.rows))
 	cursor := 0
-	for i, r := range rows {
+	for i, r := range m.rows {
 		trows[i] = r.cells()
 		if r.Port == selected {
 			cursor = i
 		}
 	}
-	m.table.SetColumns(columns(rows, m.width))
+	// Size columns from every row, so they do not jump around while typing.
+	m.table.SetColumns(columns(m.all, m.width))
 	m.table.SetRows(trows)
 	m.table.SetCursor(cursor)
 }
@@ -166,8 +235,9 @@ func (m *model) layout() {
 	if m.showDetails {
 		tableLines -= detailsLines
 	}
-	m.table.SetColumns(columns(m.rows, m.width))
+	m.table.SetColumns(columns(m.all, m.width))
 	m.table.SetWidth(m.width)
+	m.filter.SetWidth(max(m.width-lipgloss.Width(m.filter.Prompt)-1, 1))
 	m.table.SetHeight(max(tableLines, 1))
 }
 
@@ -249,15 +319,22 @@ func columns(rows []row, width int) []table.Column {
 
 func (m model) View() tea.View {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("mooring") + "  " + dimStyle.Render(m.summary()) + "\n\n")
+	b.WriteString(titleStyle.Render("mooring") + "  " + dimStyle.Render(m.summary()) + "\n")
+	// The second header line holds the filter while it is in use.
+	if m.filtering || m.filter.Value() != "" {
+		b.WriteString(m.filter.View())
+	}
+	b.WriteString("\n")
 
 	switch {
 	case m.err != nil:
 		b.WriteString(errorStyle.Render(m.err.Error()))
 	case !m.loaded:
 		b.WriteString(dimStyle.Render("Scanning ports…"))
-	case len(m.rows) == 0:
+	case len(m.all) == 0:
 		b.WriteString(dimStyle.Render("Nothing is listening."))
+	case len(m.rows) == 0:
+		b.WriteString(dimStyle.Render(fmt.Sprintf("No ports match %q.", m.filter.Value())))
 	default:
 		b.WriteString(m.table.View())
 		if m.showDetails {
@@ -265,7 +342,7 @@ func (m model) View() tea.View {
 		}
 	}
 
-	footer := dimStyle.Render("↑/↓ move   r refresh   q quit")
+	footer := dimStyle.Render(m.help())
 	if m.warning != nil {
 		footer += "   " + warningStyle.Render(m.warning.Error())
 	} else if m.hidden && os.Geteuid() != 0 {
@@ -282,10 +359,27 @@ func (m model) View() tea.View {
 	return v
 }
 
-// summary describes what the table shows, such as "8 ports · 2 containers".
+// help lists the keys that work in the current mode.
+func (m model) help() string {
+	switch {
+	case m.filtering:
+		return "type to filter   ↑/↓ move   enter done   esc clear"
+	case m.filter.Value() != "":
+		return "↑/↓ move   / edit filter   esc clear filter   r refresh   q quit"
+	default:
+		return "↑/↓ move   / filter   r refresh   q quit"
+	}
+}
+
+// summary describes what the table shows, such as "8 ports · 2 containers",
+// or "3 of 8 ports · 1 container" when filtered.
 func (m model) summary() string {
 	if !m.loaded {
 		return ""
+	}
+	portCount := plural(len(m.all), "port")
+	if len(m.rows) != len(m.all) {
+		portCount = fmt.Sprintf("%d of %s", len(m.rows), portCount)
 	}
 	ids := make(map[string]bool)
 	for _, r := range m.rows {
@@ -293,7 +387,7 @@ func (m model) summary() string {
 			ids[r.Container.ID] = true
 		}
 	}
-	return plural(len(m.rows), "port") + " · " + plural(len(ids), "container")
+	return portCount + " · " + plural(len(ids), "container")
 }
 
 func plural(n int, noun string) string {

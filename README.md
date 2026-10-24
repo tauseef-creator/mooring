@@ -10,8 +10,18 @@ PORT   PID     USER   COMMAND       PROJECT         UPTIME   ADDRESS
 ```
 
 Run `mooring` on its own to browse the same table interactively. It
-refreshes every 2 seconds; use the arrow keys to move, `r` to refresh and
-`q` to quit. When its output is piped, `mooring` prints the table instead.
+refreshes every 2 seconds and shows the full command, path, git branch and
+addresses of the selected port. When its output is piped, `mooring` prints
+the table instead.
+
+| Key     | Action                                                        |
+|---------|---------------------------------------------------------------|
+| ↑ / ↓   | move the selection                                            |
+| `/`     | filter: every word must appear in the row (`docker 44`, `main`) |
+| `enter` | keep the filter and go back to the table                      |
+| `esc`   | clear the filter, or quit when there is none                  |
+| `r`     | refresh now                                                   |
+| `q`     | quit                                                          |
 
 Linux only for now. Mooring reads `/proc` directly and needs no other tools.
 
