@@ -1,5 +1,7 @@
 # Mooring
 
+[![CI](https://github.com/tauseef-creator/mooring/actions/workflows/ci.yml/badge.svg)](https://github.com/tauseef-creator/mooring/actions/workflows/ci.yml)
+
 See who's tied up on your ports: which process, which project, and for how long.
 
 ![Mooring's interactive view: a table of listening ports with the selected row's command, path, git branch and addresses in a panel below](docs/tui.png)
