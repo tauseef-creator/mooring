@@ -3,11 +3,15 @@
 See who's tied up on your ports: which process, which project, and for how long.
 
 ```
-$ mooring
+$ mooring list
 PORT   PID     USER   COMMAND       PROJECT         UPTIME   ADDRESS
 3000   48213   me     npm run dev   shop-frontend   2h 14m   127.0.0.1
 8765   51022   me     python3 -m…   ~/Downloads     5m       0.0.0.0
 ```
+
+Run `mooring` on its own to browse the same table interactively. It
+refreshes every 2 seconds; use the arrow keys to move, `r` to refresh and
+`q` to quit. When its output is piped, `mooring` prints the table instead.
 
 Linux only for now. Mooring reads `/proc` directly and needs no other tools.
 

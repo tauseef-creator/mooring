@@ -65,6 +65,9 @@ func runKill(args []string) int {
 		errorf("%v", err)
 		return 1
 	}
+	if snap.warning != nil {
+		errorf("warning: %v", snap.warning)
+	}
 	if c, ok := snap.containers[port]; ok {
 		return stopContainer(c, port, yes, *timeout)
 	}

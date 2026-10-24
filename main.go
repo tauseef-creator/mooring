@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/tauseef-creator/mooring/internal/containers"
 	"github.com/tauseef-creator/mooring/internal/ports"
 )
@@ -18,7 +20,8 @@ import (
 const usage = `mooring: see what's running on your ports
 
 Usage:
-  mooring                      list listening ports
+  mooring                      browse ports interactively (prints a table when piped)
+  mooring list                 print a table of listening ports
   mooring kill [flags] <port>  stop whatever is using a port (see mooring kill -h)
 
 Environment:
@@ -35,6 +38,9 @@ const maxCommandWidth = 40
 // cannot stall mooring.
 const containerAPITimeout = 2 * time.Second
 
+// hiddenHint explains rows whose owner is not visible.
+const hiddenHint = "Some ports belong to other users' processes. Run with sudo to see them."
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
@@ -43,12 +49,17 @@ func main() {
 // 1 on failure and 2 on a usage error.
 func run(args []string) int {
 	if len(args) == 0 {
+		if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
+			return runTUI()
+		}
 		return runList()
 	}
 	switch args[0] {
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return 0
+	case "list":
+		return runList()
 	case "kill":
 		return runKill(args[1:])
 	default:
@@ -61,10 +72,12 @@ func run(args []string) int {
 type snapshot struct {
 	listeners  []ports.Listener
 	containers map[uint16]containers.Container // by published host port
+	warning    error                           // a container engine failed; the rest is valid
 }
 
 // scan reads the listening ports and the ports published by containers. A
-// container engine failure is only a warning, since the port list still works.
+// container engine failure only sets snapshot.warning, since the port list
+// still works without it.
 func scan() (snapshot, error) {
 	root := procRoot()
 	ls, err := ports.List(os.DirFS(root))
@@ -74,16 +87,19 @@ func scan() (snapshot, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), containerAPITimeout)
 	defer cancel()
 	published, err := containers.Published(ctx, containers.Endpoints(os.Getenv))
-	if err != nil {
-		errorf("warning: %v", err)
-	}
-	return snapshot{listeners: ls, containers: published}, nil
+	return snapshot{listeners: ls, containers: published, warning: err}, nil
 }
 
 // procRoot returns the procfs mount point. HOST_PROC overrides it, following
 // the convention used when reading a host's /proc from inside a container.
 func procRoot() string {
 	return cmp.Or(os.Getenv("HOST_PROC"), "/proc")
+}
+
+// hostRoot returns the filesystem root used to find projects. HOST_ROOT
+// overrides it, alongside HOST_PROC.
+func hostRoot() string {
+	return cmp.Or(os.Getenv("HOST_ROOT"), "/")
 }
 
 // errorf prints a message prefixed with the program name to stderr.
