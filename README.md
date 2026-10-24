@@ -2,6 +2,12 @@
 
 See who's tied up on your ports: which process, which project, and for how long.
 
+![Mooring's interactive view: a table of listening ports with the selected row's command, path, git branch and addresses in a panel below](docs/tui.png)
+
+## Usage
+
+Run `mooring` for the interactive view above, or `mooring list` for a plain table:
+
 ```
 $ mooring list
 PORT   PID     USER   COMMAND       PROJECT         UPTIME   ADDRESS
@@ -25,6 +31,8 @@ the table instead.
 | `c`     | copy the port's URL to the clipboard                          |
 | `r`     | refresh now                                                   |
 | `q`     | quit                                                          |
+
+![Filtering the table to "shop" and confirming a kill of the selected port](docs/tui-filter-kill.png)
 
 Linux only for now. Mooring reads `/proc` directly and needs no other tools.
 
