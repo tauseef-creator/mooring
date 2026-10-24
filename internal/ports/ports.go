@@ -1,8 +1,10 @@
-// Package ports reads listening TCP sockets from a Linux procfs.
+// Package ports finds listening TCP ports and the processes that own them,
+// using a Linux procfs.
 package ports
 
 import (
 	"bufio"
+	"cmp"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -10,63 +12,102 @@ import (
 	"io"
 	"io/fs"
 	"net/netip"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 )
 
-// tables are the procfs socket tables to read, relative to the procfs root.
-var tables = []struct {
-	path, proto string
-	optional    bool // tcp6 is missing when IPv6 is disabled
-}{
-	{"net/tcp", "tcp", false},
-	{"net/tcp6", "tcp6", true},
-}
-
 // stateListen is the kernel's hex code for TCP_LISTEN.
 const stateListen = "0A"
 
-// Listener is one listening TCP socket.
-type Listener struct {
-	Proto string // "tcp" or "tcp6"
-	Addr  netip.Addr
-	Port  uint16
-	UID   int
-	Inode uint64 // links the socket to a process via /proc/<pid>/fd
+// tables are the procfs socket tables to read, relative to the procfs root.
+var tables = []struct {
+	path     string
+	optional bool // tcp6 is missing when IPv6 is disabled
+}{
+	{"net/tcp", false},
+	{"net/tcp6", true},
 }
 
-// List returns all listening TCP sockets, sorted by port. procfs is the root
-// of a Linux procfs, normally os.DirFS("/proc").
+// Listener is a process listening on a TCP port. A process bound to both
+// IPv4 and IPv6 is reported once, with both addresses.
+type Listener struct {
+	Port    uint16
+	Addrs   []netip.Addr
+	UID     int
+	PID     int    // 0 when the owner is not visible, usually another user's process
+	Command string // empty when PID is 0
+}
+
+// socket is one listening row of a procfs TCP table.
+type socket struct {
+	addr  netip.Addr
+	port  uint16
+	uid   int
+	inode uint64 // links the socket to a process via <pid>/fd
+}
+
+// List returns all listening TCP ports with their owning processes, sorted by
+// port. procfs is the root of a Linux procfs, normally os.DirFS("/proc").
 func List(procfs fs.FS) ([]Listener, error) {
-	var all []Listener
-	for _, src := range tables {
-		f, err := procfs.Open(src.path)
-		if src.optional && errors.Is(err, fs.ErrNotExist) {
+	socks, err := readSockets(procfs)
+	if err != nil {
+		return nil, err
+	}
+	owners, err := socketOwners(procfs)
+	if err != nil {
+		return nil, err
+	}
+
+	type key struct {
+		port     uint16
+		uid, pid int
+	}
+	var ls []Listener
+	index := make(map[key]int)
+	for _, s := range socks {
+		k := key{s.port, s.uid, owners[s.inode]}
+		if i, ok := index[k]; ok {
+			ls[i].Addrs = append(ls[i].Addrs, s.addr)
+			continue
+		}
+		index[k] = len(ls)
+		l := Listener{Port: s.port, Addrs: []netip.Addr{s.addr}, UID: s.uid, PID: k.pid}
+		if l.PID != 0 {
+			l.Command = command(procfs, l.PID)
+		}
+		ls = append(ls, l)
+	}
+	return ls, nil
+}
+
+// readSockets reads every socket table, sorted by port and then address.
+func readSockets(procfs fs.FS) ([]socket, error) {
+	var all []socket
+	for _, t := range tables {
+		f, err := procfs.Open(t.path)
+		if t.optional && errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 		if err != nil {
 			return nil, err
 		}
-		ls, err := parse(f, src.proto)
+		socks, err := parse(f)
 		f.Close()
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", src.path, err)
+			return nil, fmt.Errorf("%s: %w", t.path, err)
 		}
-		all = append(all, ls...)
+		all = append(all, socks...)
 	}
-	sort.Slice(all, func(i, j int) bool {
-		if all[i].Port != all[j].Port {
-			return all[i].Port < all[j].Port
-		}
-		return all[i].Proto < all[j].Proto
+	slices.SortFunc(all, func(a, b socket) int {
+		return cmp.Or(cmp.Compare(a.port, b.port), a.addr.Compare(b.addr))
 	})
 	return all, nil
 }
 
-// parse reads a /proc/net/tcp or tcp6 table and keeps only listening sockets.
-func parse(r io.Reader, proto string) ([]Listener, error) {
-	var ls []Listener
+// parse reads a procfs tcp or tcp6 table and keeps only listening sockets.
+func parse(r io.Reader) ([]socket, error) {
+	var socks []socket
 	sc := bufio.NewScanner(r)
 	sc.Scan() // skip header
 	for sc.Scan() {
@@ -86,9 +127,9 @@ func parse(r io.Reader, proto string) ([]Listener, error) {
 		if err != nil {
 			return nil, fmt.Errorf("bad inode %q", fields[9])
 		}
-		ls = append(ls, Listener{Proto: proto, Addr: addr, Port: port, UID: uid, Inode: inode})
+		socks = append(socks, socket{addr: addr, port: port, uid: uid, inode: inode})
 	}
-	return ls, sc.Err()
+	return socks, sc.Err()
 }
 
 // parseAddr decodes "0100007F:0BB8" into 127.0.0.1 and 3000. The kernel
