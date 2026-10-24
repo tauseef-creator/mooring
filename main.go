@@ -11,15 +11,15 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"portman/internal/ports"
-	"portman/internal/project"
+	"mooring/internal/ports"
+	"mooring/internal/project"
 )
 
-const usage = `portman: see what's running on your ports
+const usage = `mooring: see what's running on your ports
 
 Usage:
-  portman              list listening ports
-  portman kill <port>  stop the process using a port
+  mooring              list listening ports
+  mooring kill <port>  stop the process using a port
 
 Environment:
   HOST_PROC            procfs mount point (default /proc)
@@ -44,7 +44,7 @@ func main() {
 	root := procRoot()
 	ls, err := ports.List(os.DirFS(root))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "portman: reading procfs at %s: %v\n", root, err)
+		fmt.Fprintf(os.Stderr, "mooring: reading procfs at %s: %v\n", root, err)
 		os.Exit(1)
 	}
 
