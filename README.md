@@ -53,7 +53,17 @@ to skip the prompt; without a terminal, mooring refuses unless you do.
 
 ## Install
 
-Requires Go 1.26 or later.
+Download a prebuilt binary for Linux (amd64 or arm64) from the
+[latest release](https://github.com/tauseef-creator/mooring/releases/latest).
+It is a single static file with no dependencies:
+
+```
+tar -xzf mooring_*_linux_amd64.tar.gz mooring
+sudo install mooring /usr/local/bin/
+mooring --version
+```
+
+Or install with Go 1.26 or later:
 
 ```
 go install github.com/tauseef-creator/mooring@latest

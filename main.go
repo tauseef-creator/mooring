@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"os/user"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +24,7 @@ Usage:
   mooring                      browse ports interactively (prints a table when piped)
   mooring list                 print a table of listening ports
   mooring kill [flags] <port>  stop whatever is using a port (see mooring kill -h)
+  mooring version              print the version
 
 Environment:
   HOST_PROC            procfs mount point (default /proc)
@@ -41,6 +43,23 @@ const containerAPITimeout = 2 * time.Second
 // hiddenHint explains rows whose owner is not visible.
 const hiddenHint = "Some ports belong to other users' processes. Run with sudo to see them."
 
+// version is set at build time by release builds:
+// go build -ldflags "-X main.version=v0.1.0"
+var version string
+
+// versionString reports the release version. Other builds fall back to the
+// version Go records in the binary: the module version for "go install", or
+// one derived from the git commit for a local build. "dev" covers the rest.
+func versionString() string {
+	if version != "" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return "dev"
+}
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
@@ -57,6 +76,9 @@ func run(args []string) int {
 	switch args[0] {
 	case "-h", "--help", "help":
 		fmt.Print(usage)
+		return 0
+	case "-v", "--version", "version":
+		fmt.Println("mooring", versionString())
 		return 0
 	case "list":
 		return runList()
