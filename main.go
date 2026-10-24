@@ -2,6 +2,7 @@ package main
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"net/netip"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"mooring/internal/containers"
 	"mooring/internal/ports"
 	"mooring/internal/project"
 )
@@ -24,10 +26,16 @@ Usage:
 Environment:
   HOST_PROC            procfs mount point (default /proc)
   HOST_ROOT            filesystem root for finding projects (default /)
+  DOCKER_HOST          Docker API socket (default unix:///var/run/docker.sock)
+  CONTAINER_HOST       Podman API socket (default: the rootless, then rootful socket)
 `
 
 // maxCommandWidth keeps long command lines from breaking the table.
 const maxCommandWidth = 40
+
+// containerAPITimeout bounds all Docker and Podman API calls, so a hung
+// engine cannot stall the listing.
+const containerAPITimeout = 2 * time.Second
 
 func main() {
 	if len(os.Args) > 1 {
@@ -48,6 +56,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), containerAPITimeout)
+	published, err := containers.Published(ctx, containers.Endpoints(os.Getenv))
+	cancel()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mooring: warning:", err)
+	}
+
 	rootfs := os.DirFS(cmp.Or(os.Getenv("HOST_ROOT"), "/"))
 	home, _ := os.UserHomeDir()
 	now := time.Now()
@@ -56,19 +71,26 @@ func main() {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(tw, "PORT\tPID\tUSER\tCOMMAND\tPROJECT\tUPTIME\tADDRESS")
 	for _, l := range ls {
+		command, dir, started := l.Command, l.Cwd, l.Started
+		// Published container ports are held by a proxy process, so describe
+		// the container instead.
+		if c, ok := published[l.Port]; ok {
+			command, dir, started = c.Runtime+": "+c.Name, c.Dir, c.Started
+		} else if l.PID == 0 {
+			hidden = true
+		}
+
 		pid, uptime := "-", "-"
 		if l.PID != 0 {
 			pid = strconv.Itoa(l.PID)
-		} else {
-			hidden = true
 		}
-		if !l.Started.IsZero() {
-			uptime = humanDuration(now.Sub(l.Started))
+		if !started.IsZero() {
+			uptime = humanDuration(now.Sub(started))
 		}
 		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			l.Port, pid, userName(l.UID),
-			truncate(cmp.Or(l.Command, "-"), maxCommandWidth),
-			cmp.Or(project.Describe(rootfs, l.Cwd, home), "-"),
+			truncate(cmp.Or(command, "-"), maxCommandWidth),
+			cmp.Or(project.Describe(rootfs, dir, home), "-"),
 			uptime, joinAddrs(l.Addrs))
 	}
 	tw.Flush()
