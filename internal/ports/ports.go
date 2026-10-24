@@ -12,9 +12,11 @@ import (
 	"io"
 	"io/fs"
 	"net/netip"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // stateListen is the kernel's hex code for TCP_LISTEN.
@@ -37,6 +39,10 @@ type Listener struct {
 	UID     int
 	PID     int    // 0 when the owner is not visible, usually another user's process
 	Command string // empty when PID is 0
+
+	// The fields below are best effort and empty when unknown.
+	Cwd     string    // working directory of the process
+	Started time.Time // when the process started
 }
 
 // socket is one listening row of a procfs TCP table.
@@ -58,6 +64,7 @@ func List(procfs fs.FS) ([]Listener, error) {
 	if err != nil {
 		return nil, err
 	}
+	clk, clkErr := readClock(procfs)
 
 	type key struct {
 		port     uint16
@@ -75,6 +82,10 @@ func List(procfs fs.FS) ([]Listener, error) {
 		l := Listener{Port: s.port, Addrs: []netip.Addr{s.addr}, UID: s.uid, PID: k.pid}
 		if l.PID != 0 {
 			l.Command = command(procfs, l.PID)
+			l.Cwd, _ = fs.ReadLink(procfs, path.Join(strconv.Itoa(l.PID), "cwd"))
+			if clkErr == nil {
+				l.Started = clk.started(procfs, l.PID)
+			}
 		}
 		ls = append(ls, l)
 	}

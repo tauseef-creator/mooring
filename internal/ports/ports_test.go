@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 )
 
 const tcp4 = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
@@ -32,7 +33,11 @@ func fakeProc() fstest.MapFS {
 	return fstest.MapFS{
 		"net/tcp":        {Data: []byte(tcp4)},
 		"net/tcp6":       {Data: []byte(tcp6)},
+		"stat":           {Data: []byte(procStat)},
+		"self/auxv":      {Data: auxv(atClkTck, 100)},
 		"1234/cmdline":   {Data: []byte("/usr/bin/node\x00server.js\x00")},
+		"1234/cwd":       link("/home/me/shop"),
+		"1234/stat":      {Data: []byte(pidStat)},
 		"1234/fd/0":      link("/dev/pts/0"),
 		"1234/fd/3":      link("socket:[48213]"),
 		"1300/cmdline":   {Data: []byte("/usr/bin/node\x00worker.js\x00")},
@@ -52,7 +57,10 @@ func TestList(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []Listener{
-		{Port: 3000, Addrs: addrs("127.0.0.1"), UID: 1000, PID: 1234, Command: "node server.js"},
+		{
+			Port: 3000, Addrs: addrs("127.0.0.1"), UID: 1000, PID: 1234, Command: "node server.js",
+			Cwd: "/home/me/shop", Started: time.Unix(1700000000, 0).Add(123*time.Second + 450*time.Millisecond),
+		},
 		{Port: 5173, Addrs: addrs("::1"), UID: 1000},
 		{Port: 8080, Addrs: addrs("0.0.0.0", "::"), UID: 0, PID: 77, Command: "nginx"},
 	}

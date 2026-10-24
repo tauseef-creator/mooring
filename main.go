@@ -9,8 +9,10 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"portman/internal/ports"
+	"portman/internal/project"
 )
 
 const usage = `portman: see what's running on your ports
@@ -21,10 +23,11 @@ Usage:
 
 Environment:
   HOST_PROC            procfs mount point (default /proc)
+  HOST_ROOT            filesystem root for finding projects (default /)
 `
 
 // maxCommandWidth keeps long command lines from breaking the table.
-const maxCommandWidth = 48
+const maxCommandWidth = 40
 
 func main() {
 	if len(os.Args) > 1 {
@@ -45,18 +48,28 @@ func main() {
 		os.Exit(1)
 	}
 
+	rootfs := os.DirFS(cmp.Or(os.Getenv("HOST_ROOT"), "/"))
+	home, _ := os.UserHomeDir()
+	now := time.Now()
+
 	hidden := false
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "PORT\tPID\tUSER\tCOMMAND\tADDRESS")
+	fmt.Fprintln(tw, "PORT\tPID\tUSER\tCOMMAND\tPROJECT\tUPTIME\tADDRESS")
 	for _, l := range ls {
-		pid := "-"
+		pid, uptime := "-", "-"
 		if l.PID != 0 {
 			pid = strconv.Itoa(l.PID)
 		} else {
 			hidden = true
 		}
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n",
-			l.Port, pid, userName(l.UID), truncate(cmp.Or(l.Command, "-"), maxCommandWidth), joinAddrs(l.Addrs))
+		if !l.Started.IsZero() {
+			uptime = humanDuration(now.Sub(l.Started))
+		}
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			l.Port, pid, userName(l.UID),
+			truncate(cmp.Or(l.Command, "-"), maxCommandWidth),
+			cmp.Or(project.Describe(rootfs, l.Cwd, home), "-"),
+			uptime, joinAddrs(l.Addrs))
 	}
 	tw.Flush()
 
@@ -86,6 +99,24 @@ func joinAddrs(addrs []netip.Addr) string {
 		s[i] = a.String()
 	}
 	return strings.Join(s, ", ")
+}
+
+// humanDuration formats d with its two largest units, such as "2h 14m".
+func humanDuration(d time.Duration) string {
+	d = max(d, 0)
+	days := int(d / (24 * time.Hour))
+	hours := int(d / time.Hour % 24)
+	mins := int(d / time.Minute % 60)
+	switch {
+	case days > 0:
+		return fmt.Sprintf("%dd %dh", days, hours)
+	case hours > 0:
+		return fmt.Sprintf("%dh %dm", hours, mins)
+	case mins > 0:
+		return fmt.Sprintf("%dm", mins)
+	default:
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	}
 }
 
 // truncate shortens s to at most n runes, marking the cut with an ellipsis.
