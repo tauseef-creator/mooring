@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -31,11 +33,11 @@ const apiHost = "localhost"
 
 // Container is a running container that publishes ports on the host.
 type Container struct {
-	ID      string
-	Name    string
-	Runtime string    // the engine running it: "docker" or "podman"
-	Dir     string    // compose project directory, empty if not from compose
-	Started time.Time // zero if unknown
+	ID       string
+	Name     string
+	Endpoint Endpoint  // the engine running it
+	Dir      string    // compose project directory, empty if not from compose
+	Started  time.Time // zero if unknown
 }
 
 // Endpoint is a container engine's API socket.
@@ -111,15 +113,47 @@ type apiInspect struct {
 	}
 }
 
-func query(ctx context.Context, ep Endpoint) (map[uint16]Container, error) {
+// Stop asks the engine to stop the container. Like "docker stop -t", the
+// engine sends SIGTERM and then SIGKILL if the container outlives grace.
+// ctx must allow longer than grace.
+func (c Container) Stop(ctx context.Context, grace time.Duration) error {
+	client, done := newClient(c.Endpoint.Socket)
+	defer done()
+
+	secs := strconv.Itoa(int(math.Ceil(grace.Seconds())))
+	path := "/containers/" + url.PathEscape(c.ID) + "/stop?t=" + secs
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+apiHost+path, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusNoContent, http.StatusNotModified: // stopped, or already stopped
+		return nil
+	default:
+		return fmt.Errorf("POST %s: %s", path, resp.Status)
+	}
+}
+
+// newClient returns an HTTP client that talks to the API over socket, and a
+// function that releases its connections.
+func newClient(socket string) (*http.Client, func()) {
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
-			return d.DialContext(ctx, "unix", ep.Socket)
+			return d.DialContext(ctx, "unix", socket)
 		},
 	}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport}
+	return &http.Client{Transport: transport}, transport.CloseIdleConnections
+}
+
+func query(ctx context.Context, ep Endpoint) (map[uint16]Container, error) {
+	client, done := newClient(ep.Socket)
+	defer done()
 
 	var list []apiContainer
 	if err := getJSON(ctx, client, "/containers/json", &list); err != nil {
@@ -136,7 +170,7 @@ func query(ctx context.Context, ep Endpoint) (map[uint16]Container, error) {
 		if len(ports) == 0 {
 			continue
 		}
-		c := Container{ID: ac.ID, Runtime: ep.Runtime, Dir: ac.Labels[composeDirLabel]}
+		c := Container{ID: ac.ID, Endpoint: ep, Dir: ac.Labels[composeDirLabel]}
 		if len(ac.Names) > 0 {
 			c.Name = strings.TrimPrefix(ac.Names[0], "/")
 		}

@@ -9,19 +9,17 @@ import (
 	"os/user"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"mooring/internal/containers"
 	"mooring/internal/ports"
-	"mooring/internal/project"
 )
 
 const usage = `mooring: see what's running on your ports
 
 Usage:
-  mooring              list listening ports
-  mooring kill <port>  stop the process using a port
+  mooring                      list listening ports
+  mooring kill [flags] <port>  stop whatever is using a port (see mooring kill -h)
 
 Environment:
   HOST_PROC            procfs mount point (default /proc)
@@ -30,80 +28,67 @@ Environment:
   CONTAINER_HOST       Podman API socket (default: the rootless, then rootful socket)
 `
 
-// maxCommandWidth keeps long command lines from breaking the table.
+// maxCommandWidth keeps long command lines from breaking the output.
 const maxCommandWidth = 40
 
-// containerAPITimeout bounds all Docker and Podman API calls, so a hung
-// engine cannot stall the listing.
+// containerAPITimeout bounds Docker and Podman API calls, so a hung engine
+// cannot stall mooring.
 const containerAPITimeout = 2 * time.Second
 
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "-h", "--help", "help":
-			fmt.Print(usage)
-			return
-		default:
-			fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", os.Args[1], usage)
-			os.Exit(2)
-		}
-	}
+	os.Exit(run(os.Args[1:]))
+}
 
+// run executes the command in args and returns the exit code: 0 on success,
+// 1 on failure and 2 on a usage error.
+func run(args []string) int {
+	if len(args) == 0 {
+		return runList()
+	}
+	switch args[0] {
+	case "-h", "--help", "help":
+		fmt.Print(usage)
+		return 0
+	case "kill":
+		return runKill(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", args[0], usage)
+		return 2
+	}
+}
+
+// snapshot is what mooring knows about the ports in use at one moment.
+type snapshot struct {
+	listeners  []ports.Listener
+	containers map[uint16]containers.Container // by published host port
+}
+
+// scan reads the listening ports and the ports published by containers. A
+// container engine failure is only a warning, since the port list still works.
+func scan() (snapshot, error) {
 	root := procRoot()
 	ls, err := ports.List(os.DirFS(root))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "mooring: reading procfs at %s: %v\n", root, err)
-		os.Exit(1)
+		return snapshot{}, fmt.Errorf("reading procfs at %s: %w", root, err)
 	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), containerAPITimeout)
+	defer cancel()
 	published, err := containers.Published(ctx, containers.Endpoints(os.Getenv))
-	cancel()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "mooring: warning:", err)
+		errorf("warning: %v", err)
 	}
-
-	rootfs := os.DirFS(cmp.Or(os.Getenv("HOST_ROOT"), "/"))
-	home, _ := os.UserHomeDir()
-	now := time.Now()
-
-	hidden := false
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "PORT\tPID\tUSER\tCOMMAND\tPROJECT\tUPTIME\tADDRESS")
-	for _, l := range ls {
-		command, dir, started := l.Command, l.Cwd, l.Started
-		// Published container ports are held by a proxy process, so describe
-		// the container instead.
-		if c, ok := published[l.Port]; ok {
-			command, dir, started = c.Runtime+": "+c.Name, c.Dir, c.Started
-		} else if l.PID == 0 {
-			hidden = true
-		}
-
-		pid, uptime := "-", "-"
-		if l.PID != 0 {
-			pid = strconv.Itoa(l.PID)
-		}
-		if !started.IsZero() {
-			uptime = humanDuration(now.Sub(started))
-		}
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			l.Port, pid, userName(l.UID),
-			truncate(cmp.Or(command, "-"), maxCommandWidth),
-			cmp.Or(project.Describe(rootfs, dir, home), "-"),
-			uptime, joinAddrs(l.Addrs))
-	}
-	tw.Flush()
-
-	if hidden && os.Geteuid() != 0 {
-		fmt.Fprintln(os.Stderr, "\nSome ports belong to other users' processes. Run with sudo to see them.")
-	}
+	return snapshot{listeners: ls, containers: published}, nil
 }
 
 // procRoot returns the procfs mount point. HOST_PROC overrides it, following
 // the convention used when reading a host's /proc from inside a container.
 func procRoot() string {
 	return cmp.Or(os.Getenv("HOST_PROC"), "/proc")
+}
+
+// errorf prints a message prefixed with the program name to stderr.
+func errorf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "mooring: "+format+"\n", args...)
 }
 
 // userName returns the login name for uid, or the number if it has none.

@@ -11,6 +11,19 @@ PORT   PID     USER   COMMAND       PROJECT         UPTIME   ADDRESS
 
 Linux only for now. Mooring reads `/proc` directly and needs no other tools.
 
+## Free a port
+
+```
+$ mooring kill 3000
+Stop "npm run dev" (PID 48213) on port 3000? [y/N] y
+Stopped "npm run dev" (PID 48213) on port 3000
+```
+
+Processes get SIGTERM, then SIGKILL if they are still running after
+`-timeout` (default 10s, the same as `docker stop`). A port published by a
+container stops the container through Docker or Podman instead. Pass `-y`
+to skip the prompt; without a terminal, mooring refuses unless you do.
+
 ## Build
 
 ```

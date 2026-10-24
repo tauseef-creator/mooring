@@ -52,16 +52,16 @@ func engineAPI() http.Handler {
 }
 
 func TestPublished(t *testing.T) {
-	sock := fakeEngine(t, engineAPI())
-	got, err := Published(context.Background(), []Endpoint{{Runtime: "docker", Socket: sock}})
+	ep := Endpoint{Runtime: "docker", Socket: fakeEngine(t, engineAPI())}
+	got, err := Published(context.Background(), []Endpoint{ep})
 	if err != nil {
 		t.Fatal(err)
 	}
 	api := Container{
-		ID: "aaa111", Name: "shop-api-1", Runtime: "docker", Dir: "/home/me/shop",
+		ID: "aaa111", Name: "shop-api-1", Endpoint: ep, Dir: "/home/me/shop",
 		Started: time.Date(2026, 10, 24, 9, 0, 0, 5e8, time.UTC),
 	}
-	cache := Container{ID: "ccc333", Name: "cache", Runtime: "docker"}
+	cache := Container{ID: "ccc333", Name: "cache", Endpoint: ep}
 	want := map[uint16]Container{8080: api, 16379: cache}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got  %+v\nwant %+v", got, want)
@@ -97,6 +97,33 @@ func TestPublishedErrors(t *testing.T) {
 		if len(got) != tt.wantLen {
 			t.Errorf("%s: got %d ports, want %d", tt.name, len(got), tt.wantLen)
 		}
+	}
+}
+
+func TestStop(t *testing.T) {
+	var gotGrace string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /containers/running/stop", func(w http.ResponseWriter, r *http.Request) {
+		gotGrace = r.URL.Query().Get("t")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /containers/stopped/stop", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotModified)
+	})
+	ep := Endpoint{Runtime: "docker", Socket: fakeEngine(t, mux)}
+	ctx := context.Background()
+
+	if err := (Container{ID: "running", Endpoint: ep}).Stop(ctx, 2500*time.Millisecond); err != nil {
+		t.Errorf("running: %v", err)
+	}
+	if gotGrace != "3" {
+		t.Errorf("t = %q, want 3 (grace rounded up to whole seconds)", gotGrace)
+	}
+	if err := (Container{ID: "stopped", Endpoint: ep}).Stop(ctx, time.Second); err != nil {
+		t.Errorf("already stopped should succeed, got %v", err)
+	}
+	if err := (Container{ID: "unknown", Endpoint: ep}).Stop(ctx, time.Second); err == nil {
+		t.Error("unknown container: want error, got nil")
 	}
 }
 
