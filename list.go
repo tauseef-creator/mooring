@@ -8,7 +8,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"mooring/internal/project"
+	"github.com/tauseef-creator/mooring/internal/project"
 )
 
 // runList prints a table of listening ports.

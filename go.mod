@@ -1,4 +1,4 @@
-module mooring
+module github.com/tauseef-creator/mooring
 
 go 1.26.10
 

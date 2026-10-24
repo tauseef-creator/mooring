@@ -24,9 +24,19 @@ Processes get SIGTERM, then SIGKILL if they are still running after
 container stops the container through Docker or Podman instead. Pass `-y`
 to skip the prompt; without a terminal, mooring refuses unless you do.
 
-## Build
+## Install
+
+Requires Go 1.26 or later.
 
 ```
+go install github.com/tauseef-creator/mooring@latest
+```
+
+Or build from source:
+
+```
+git clone https://github.com/tauseef-creator/mooring.git
+cd mooring
 go build -o mooring .
 ```
 

@@ -15,8 +15,8 @@ import (
 
 	"golang.org/x/term"
 
-	"mooring/internal/containers"
-	"mooring/internal/ports"
+	"github.com/tauseef-creator/mooring/internal/containers"
+	"github.com/tauseef-creator/mooring/internal/ports"
 )
 
 const killUsage = `Usage: mooring kill [flags] <port>

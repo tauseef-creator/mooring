@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"mooring/internal/containers"
-	"mooring/internal/ports"
+	"github.com/tauseef-creator/mooring/internal/containers"
+	"github.com/tauseef-creator/mooring/internal/ports"
 )
 
 const usage = `mooring: see what's running on your ports
