@@ -35,6 +35,7 @@ const apiHost = "localhost"
 type Container struct {
 	ID       string
 	Name     string
+	Image    string
 	Endpoint Endpoint  // the engine running it
 	Dir      string    // compose project directory, empty if not from compose
 	Started  time.Time // zero if unknown
@@ -99,6 +100,7 @@ func Published(ctx context.Context, eps []Endpoint) (map[uint16]Container, error
 type apiContainer struct {
 	ID     string `json:"Id"`
 	Names  []string
+	Image  string
 	Labels map[string]string
 	Ports  []struct {
 		PublicPort uint16
@@ -170,7 +172,7 @@ func query(ctx context.Context, ep Endpoint) (map[uint16]Container, error) {
 		if len(ports) == 0 {
 			continue
 		}
-		c := Container{ID: ac.ID, Endpoint: ep, Dir: ac.Labels[composeDirLabel]}
+		c := Container{ID: ac.ID, Image: ac.Image, Endpoint: ep, Dir: ac.Labels[composeDirLabel]}
 		if len(ac.Names) > 0 {
 			c.Name = strings.TrimPrefix(ac.Names[0], "/")
 		}

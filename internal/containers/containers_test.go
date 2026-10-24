@@ -12,7 +12,7 @@ import (
 )
 
 const containersJSON = `[
-  {"Id": "aaa111", "Names": ["/shop-api-1"],
+  {"Id": "aaa111", "Names": ["/shop-api-1"], "Image": "shop-api:latest",
    "Labels": {"com.docker.compose.project.working_dir": "/home/me/shop"},
    "Ports": [
      {"IP": "0.0.0.0", "PrivatePort": 8080, "PublicPort": 8080, "Type": "tcp"},
@@ -58,7 +58,7 @@ func TestPublished(t *testing.T) {
 		t.Fatal(err)
 	}
 	api := Container{
-		ID: "aaa111", Name: "shop-api-1", Endpoint: ep, Dir: "/home/me/shop",
+		ID: "aaa111", Name: "shop-api-1", Image: "shop-api:latest", Endpoint: ep, Dir: "/home/me/shop",
 		Started: time.Date(2026, 10, 24, 9, 0, 0, 5e8, time.UTC),
 	}
 	cache := Container{ID: "ccc333", Name: "cache", Endpoint: ep}

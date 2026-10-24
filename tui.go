@@ -1,6 +1,8 @@
 package main
 
 import (
+	"cmp"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -23,7 +25,14 @@ const (
 	footerLines  = 2 // blank line and the help line
 	cellPadding  = 2 // the table pads each cell with a space on both sides
 	minFlexWidth = 8 // narrowest a shrinkable column may become
+
+	detailsLines  = 6 // details panel: 4 lines of content plus its border
+	panelChrome   = 4 // horizontal space the panel's border and padding take
+	minTableLines = 5 // hide the details panel rather than shrink the table below this
 )
+
+// shortIDLen is the container ID length docker ps shows.
+const shortIDLen = 12
 
 // shrinkOrder lists the columns that give up width, first to last, when the
 // terminal is too narrow.
@@ -34,6 +43,8 @@ var (
 	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	boldStyle    = lipgloss.NewStyle().Bold(true)
+	panelStyle   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("8")).Padding(0, 1)
 )
 
 // scanMsg carries the result of a background scan.
@@ -56,6 +67,8 @@ type model struct {
 	gen     int
 	width   int
 	height  int
+
+	showDetails bool // false when the window is too short for the panel
 }
 
 func runTUI() int {
@@ -146,11 +159,57 @@ func (m *model) setRows(rows []row, hidden bool) {
 	m.table.SetCursor(cursor)
 }
 
-// layout fits the table to the window.
+// layout fits the table and the details panel to the window.
 func (m *model) layout() {
+	tableLines := m.height - headerLines - footerLines
+	m.showDetails = m.width > panelChrome && tableLines-detailsLines >= minTableLines
+	if m.showDetails {
+		tableLines -= detailsLines
+	}
 	m.table.SetColumns(columns(m.rows, m.width))
 	m.table.SetWidth(m.width)
-	m.table.SetHeight(max(m.height-headerLines-footerLines, 1))
+	m.table.SetHeight(max(tableLines, 1))
+}
+
+// selected returns the row under the cursor.
+func (m model) selected() (row, bool) {
+	c := m.table.Cursor()
+	if c < 0 || c >= len(m.rows) {
+		return row{}, false
+	}
+	return m.rows[c], true
+}
+
+// detailsView renders the panel describing the selected row.
+func (m model) detailsView() string {
+	r, ok := m.selected()
+	if !ok {
+		return ""
+	}
+	var title string
+	switch {
+	case r.Container != nil:
+		c := r.Container
+		id := c.ID[:min(len(c.ID), shortIDLen)]
+		title = boldStyle.Render(c.Endpoint.Runtime+" container "+c.Name) + "  " +
+			dimStyle.Render(fmt.Sprintf("(image %s, id %s)", cmp.Or(c.Image, "?"), id))
+	case r.PID == "-":
+		title = boldStyle.Render("Process of user "+r.User) + "  " + dimStyle.Render("(run with sudo to see it)")
+	default:
+		title = boldStyle.Render(r.Command) + "  " + dimStyle.Render(fmt.Sprintf("(PID %s, user %s)", r.PID, r.User))
+	}
+
+	lines := []string{
+		title,
+		dimStyle.Render("path    ") + cmp.Or(r.Dir, "-"),
+		dimStyle.Render("branch  ") + cmp.Or(r.Branch, "-"),
+		dimStyle.Render("listen  ") + r.Listen,
+	}
+	clip := lipgloss.NewStyle().MaxWidth(m.width - panelChrome)
+	for i, l := range lines {
+		lines[i] = clip.Render(l)
+	}
+	return panelStyle.Width(m.width).Render(strings.Join(lines, "\n"))
 }
 
 // columns sizes each column to its widest cell. When the total is wider than
@@ -201,6 +260,9 @@ func (m model) View() tea.View {
 		b.WriteString(dimStyle.Render("Nothing is listening."))
 	default:
 		b.WriteString(m.table.View())
+		if m.showDetails {
+			b.WriteString("\n" + m.detailsView())
+		}
 	}
 
 	footer := dimStyle.Render("↑/↓ move   r refresh   q quit")

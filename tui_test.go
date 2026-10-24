@@ -2,12 +2,17 @@ package main
 
 import (
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
+	"github.com/tauseef-creator/mooring/internal/containers"
 	"github.com/tauseef-creator/mooring/internal/ports"
 )
 
@@ -114,6 +119,93 @@ func TestQuitKeys(t *testing.T) {
 		}
 		if _, ok := cmd().(tea.QuitMsg); !ok {
 			t.Errorf("%s: did not quit", k)
+		}
+	}
+}
+
+// detailsModel returns a sized model showing one row built from l, with
+// HOST_ROOT pointing at a fake filesystem holding a git repo at /shop.
+func detailsModel(t *testing.T, width, height int, l ports.Listener, c *containers.Container) model {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "shop/.git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "shop/.git/HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOST_ROOT", root)
+
+	snap := snapshot{listeners: []ports.Listener{l}}
+	if c != nil {
+		snap.containers = map[uint16]containers.Container{l.Port: *c}
+	}
+	m := newModel()
+	m, _ = update(t, m, tea.WindowSizeMsg{Width: width, Height: height})
+	m, _ = update(t, m, scanMsg{snap: snap})
+	return m
+}
+
+func TestDetailsPanel(t *testing.T) {
+	process := ports.Listener{
+		Port: 3000, PID: 4321, Command: "npm run dev", Cwd: "/shop/apps/web",
+		Addrs: []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("::1")},
+	}
+	hidden := ports.Listener{Port: 53, Addrs: []netip.Addr{netip.MustParseAddr("127.0.0.53")}}
+	container := &containers.Container{
+		ID: "0123456789abcdef", Name: "api", Image: "api:dev", Dir: "/shop",
+		Endpoint: containers.Endpoint{Runtime: "docker"},
+	}
+
+	tests := []struct {
+		name string
+		l    ports.Listener
+		c    *containers.Container
+		want []string
+	}{
+		{"process", process, nil, []string{
+			"npm run dev", "(PID 4321, user", "path    /shop/apps/web",
+			"branch  main", "listen  127.0.0.1:3000, [::1]:3000",
+		}},
+		{"container", hidden, container, []string{
+			"docker container api", "(image api:dev, id 0123456789ab)", "path    /shop", "branch  main",
+		}},
+		{"hidden owner", hidden, nil, []string{
+			"Process of user", "run with sudo", "path    -", "branch  -", "listen  127.0.0.53:53",
+		}},
+	}
+	for _, tt := range tests {
+		v := ansi.Strip(detailsModel(t, 120, 30, tt.l, tt.c).View().Content)
+		for _, want := range tt.want {
+			if !strings.Contains(v, want) {
+				t.Errorf("%s: view is missing %q", tt.name, want)
+			}
+		}
+	}
+}
+
+func TestDetailsPanelHiddenWhenShort(t *testing.T) {
+	l := ports.Listener{Port: 3000, PID: 1, Command: "vite", Addrs: []netip.Addr{netip.MustParseAddr("::1")}}
+	m := detailsModel(t, 120, 10, l, nil)
+	if m.showDetails || strings.Contains(ansi.Strip(m.View().Content), "listen  ") {
+		t.Error("details panel shown in a 10-line window")
+	}
+}
+
+func TestDetailsPanelNeverWraps(t *testing.T) {
+	l := ports.Listener{
+		Port: 3000, PID: 1, Command: "node " + strings.Repeat("--flag ", 20),
+		Cwd: "/shop/" + strings.Repeat("deep/", 20), Addrs: []netip.Addr{netip.MustParseAddr("::1")},
+	}
+	const width = 50
+	m := detailsModel(t, width, 30, l, nil)
+	panel := m.detailsView()
+	if got := strings.Count(panel, "\n") + 1; got != detailsLines {
+		t.Errorf("panel has %d lines, want %d", got, detailsLines)
+	}
+	for _, line := range strings.Split(panel, "\n") {
+		if w := lipgloss.Width(line); w > width {
+			t.Errorf("line is %d wide, window is %d: %q", w, width, line)
 		}
 	}
 }

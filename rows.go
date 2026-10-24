@@ -2,8 +2,10 @@ package main
 
 import (
 	"cmp"
+	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/tauseef-creator/mooring/internal/containers"
@@ -30,6 +32,11 @@ type row struct {
 	Project string
 	Uptime  string
 	Address string
+
+	// Details shown for the selected row in the TUI.
+	Dir    string // full working or compose directory, empty if unknown
+	Branch string // git branch of the project, empty if none
+	Listen string // addresses with the port, such as "0.0.0.0:80, [::]:80"
 
 	// Container is set when a container publishes the port.
 	Container *containers.Container
@@ -61,6 +68,15 @@ func buildRows(snap snapshot, now time.Time) (rows []row, hidden bool) {
 		}
 		r.Command = cmp.Or(command, "-")
 		r.Project = cmp.Or(project.Describe(rootfs, dir, home), "-")
+		r.Dir = dir
+		if root, ok := project.Root(rootfs, dir); ok && dir != "" {
+			r.Branch, _ = project.Branch(rootfs, root)
+		}
+		listen := make([]string, len(l.Addrs))
+		for i, a := range l.Addrs {
+			listen[i] = netip.AddrPortFrom(a, l.Port).String()
+		}
+		r.Listen = strings.Join(listen, ", ")
 		r.Uptime = "-"
 		if !started.IsZero() {
 			r.Uptime = humanDuration(now.Sub(started))

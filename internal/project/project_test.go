@@ -41,6 +41,38 @@ func TestDescribe(t *testing.T) {
 	}
 }
 
+func TestBranch(t *testing.T) {
+	const sha = "4f243907c1d0e2b5a6f7e8d9c0b1a2f3e4d5c6b7"
+	rootfs := fstest.MapFS{
+		"repo/.git/HEAD":              {Data: []byte("ref: refs/heads/feature/checkout\n")},
+		"detached/.git/HEAD":          {Data: []byte(sha + "\n")},
+		"main/.git/worktrees/wt/HEAD": {Data: []byte("ref: refs/heads/hotfix\n")},
+		"wt/.git":                     {Data: []byte("gitdir: /main/.git/worktrees/wt\n")},
+		"mods/lib/.git":               {Data: []byte("gitdir: ../.git/modules/lib\n")},
+		"mods/.git/modules/lib/HEAD":  {Data: []byte("ref: refs/heads/main\n")},
+		"broken/.git":                 {Data: []byte("not a gitdir line\n")},
+		"empty/.git/config":           {},
+	}
+	tests := []struct {
+		root, want string
+		ok         bool
+	}{
+		{"/repo", "feature/checkout", true},
+		{"/detached", "4f24390", true},
+		{"/wt", "hotfix", true},     // worktree, absolute gitdir
+		{"/mods/lib", "main", true}, // submodule, relative gitdir
+		{"/broken", "", false},
+		{"/empty", "", false}, // no HEAD
+		{"/missing", "", false},
+	}
+	for _, tt := range tests {
+		got, ok := Branch(rootfs, tt.root)
+		if got != tt.want || ok != tt.ok {
+			t.Errorf("Branch(%q) = %q, %v; want %q, %v", tt.root, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
 func TestDescribeWithoutHome(t *testing.T) {
 	if got := Describe(fakeRoot(), "/home/me/notes", ""); got != "/home/me/notes" {
 		t.Errorf("got %q, want the full path", got)
