@@ -2,12 +2,14 @@ package main
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/table"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
@@ -19,6 +21,9 @@ const refreshInterval = 2 * time.Second
 
 // tuiHiddenHint is a shorter hiddenHint that fits beside the key help.
 const tuiHiddenHint = "run with sudo to see every owner"
+
+// statusDuration is how long the outcome of an action stays in the footer.
+const statusDuration = 4 * time.Second
 
 // Layout constants for the TUI.
 const (
@@ -44,6 +49,7 @@ var (
 	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	statusStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	boldStyle    = lipgloss.NewStyle().Bold(true)
 	panelStyle   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("8")).Padding(0, 1)
 )
@@ -57,6 +63,22 @@ type scanMsg struct {
 // tickMsg asks for the next scan. gen ties it to the scan that scheduled it,
 // so a manual refresh does not start a second refresh loop.
 type tickMsg struct{ gen int }
+
+// statusMsg reports the outcome of an action in the footer.
+type statusMsg struct {
+	text string
+	err  error
+}
+
+// clearStatusMsg hides the status set with the same id.
+type clearStatusMsg struct{ id int }
+
+// stopDoneMsg reports that a kill finished.
+type stopDoneMsg statusMsg
+
+// clipboardFallbackMsg asks the terminal to copy text, for systems without
+// a clipboard tool.
+type clipboardFallbackMsg struct{ text string }
 
 type model struct {
 	table   table.Model
@@ -74,6 +96,14 @@ type model struct {
 
 	filter    textinput.Model
 	filtering bool // the filter input has focus
+
+	snap     snapshot // the last scan, used to work out what k stops
+	confirm  *target  // waiting for y/n before stopping this
+	stopping bool     // a kill is running in the background
+
+	status    string // outcome of the last action, shown in the footer
+	statusErr bool
+	statusID  int
 }
 
 func runTUI() int {
@@ -89,12 +119,17 @@ func newModel() model {
 	styles.Header = styles.Header.Foreground(lipgloss.Color("8"))
 	styles.Selected = styles.Selected.Foreground(lipgloss.Color("0")).Background(lipgloss.Color("6"))
 
+	// Move with the arrow keys only: k stops the selected port.
+	keys := table.DefaultKeyMap()
+	keys.LineUp = key.NewBinding(key.WithKeys("up"))
+	keys.LineDown = key.NewBinding(key.WithKeys("down"))
+
 	filter := textinput.New()
 	filter.Prompt = "/ "
 	filter.Placeholder = "filter by port, command, project, container…"
 
 	return model{
-		table:  table.New(table.WithFocused(true), table.WithStyles(styles)),
+		table:  table.New(table.WithFocused(true), table.WithStyles(styles), table.WithKeyMap(keys)),
 		filter: filter,
 	}
 }
@@ -120,6 +155,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
+		if m.confirm != nil {
+			return m.updateConfirm(msg)
+		}
 		if m.filtering {
 			return m.updateFilter(msg)
 		}
@@ -138,13 +176,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "r":
 			return m, scanCmd
+		case "k":
+			return m.startKill()
+		case "o":
+			if r, ok := m.selected(); ok {
+				return m, openCmd(localURL(r))
+			}
+		case "c":
+			if r, ok := m.selected(); ok {
+				return m, copyCmd(localURL(r))
+			}
 		}
+
+	case statusMsg:
+		return m, m.setStatus(msg.text, msg.err)
+
+	case clearStatusMsg:
+		if msg.id == m.statusID {
+			m.status = ""
+		}
+		return m, nil
+
+	case clipboardFallbackMsg:
+		cmd := m.setStatus("Asked the terminal to copy "+msg.text, nil)
+		return m, tea.Batch(tea.SetClipboard(msg.text), cmd)
+
+	case stopDoneMsg:
+		m.stopping = false
+		return m, tea.Batch(m.setStatus(msg.text, msg.err), scanCmd)
 
 	case scanMsg:
 		m.gen++
 		m.err = msg.err
 		if msg.err == nil {
 			m.loaded = true
+			m.snap = msg.snap
 			m.warning = msg.snap.warning
 			rows, hidden := buildRows(msg.snap, time.Now())
 			m.setRows(rows, hidden)
@@ -161,6 +227,72 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.table, cmd = m.table.Update(msg)
 	return m, cmd
+}
+
+// startKill asks to confirm stopping the selected port.
+func (m model) startKill() (tea.Model, tea.Cmd) {
+	if m.stopping {
+		return m, m.setStatus("", errors.New("still stopping the previous port"))
+	}
+	r, ok := m.selected()
+	if !ok {
+		return m, nil
+	}
+	t, err := findTarget(m.snap, r.Port)
+	if err != nil {
+		return m, m.setStatus("", err)
+	}
+	m.confirm = &t
+	return m, nil
+}
+
+// updateConfirm handles the answer to the kill prompt: y stops the target,
+// any other key cancels.
+func (m model) updateConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	t := *m.confirm
+	m.confirm = nil
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "y", "Y":
+		m.stopping = true
+		m.statusID++ // a stop can outlast the status timeout, so do not expire this one
+		m.status, m.statusErr = "Stopping "+t.what+"…", false
+		return m, func() tea.Msg {
+			text, err := t.stop(defaultKillTimeout)
+			return stopDoneMsg{text: text, err: err}
+		}
+	}
+	return m, m.setStatus("Cancelled", nil)
+}
+
+// setStatus shows text, or err when set, in the footer for statusDuration.
+func (m *model) setStatus(text string, err error) tea.Cmd {
+	m.statusID++
+	m.status, m.statusErr = text, err != nil
+	if err != nil {
+		m.status = err.Error()
+	}
+	id := m.statusID
+	return tea.Tick(statusDuration, func(time.Time) tea.Msg { return clearStatusMsg{id: id} })
+}
+
+func openCmd(u string) tea.Cmd {
+	return func() tea.Msg {
+		if err := openURL(u); err != nil {
+			return statusMsg{err: fmt.Errorf("opening %s: %w", u, err)}
+		}
+		return statusMsg{text: "Opened " + u}
+	}
+}
+
+func copyCmd(u string) tea.Cmd {
+	return func() tea.Msg {
+		if err := copyText(u); err != nil {
+			return clipboardFallbackMsg{text: u}
+		}
+		return statusMsg{text: "Copied " + u}
+	}
 }
 
 // updateFilter handles a key while the filter input has focus.
@@ -342,11 +474,21 @@ func (m model) View() tea.View {
 		}
 	}
 
-	footer := dimStyle.Render(m.help())
-	if m.warning != nil {
-		footer += "   " + warningStyle.Render(m.warning.Error())
-	} else if m.hidden && os.Geteuid() != 0 {
-		footer += "   " + warningStyle.Render(tuiHiddenHint)
+	var footer string
+	switch {
+	case m.confirm != nil:
+		footer = warningStyle.Render(m.confirm.question() + "  y/n")
+	case m.status != "" && m.statusErr:
+		footer = errorStyle.Render(m.status)
+	case m.status != "":
+		footer = statusStyle.Render(m.status)
+	default:
+		footer = dimStyle.Render(m.help())
+		if m.warning != nil {
+			footer += "   " + warningStyle.Render(m.warning.Error())
+		} else if m.hidden && os.Geteuid() != 0 {
+			footer += "   " + warningStyle.Render(tuiHiddenHint)
+		}
 	}
 	if m.width > 0 {
 		footer = lipgloss.NewStyle().MaxWidth(m.width).Render(footer) // never wrap
@@ -365,9 +507,9 @@ func (m model) help() string {
 	case m.filtering:
 		return "type to filter   ↑/↓ move   enter done   esc clear"
 	case m.filter.Value() != "":
-		return "↑/↓ move   / edit filter   esc clear filter   r refresh   q quit"
+		return "↑/↓ move   / edit filter   esc clear filter   k kill   o open   c copy URL   q quit"
 	default:
-		return "↑/↓ move   / filter   r refresh   q quit"
+		return "↑/↓ move   / filter   k kill   o open   c copy URL   r refresh   q quit"
 	}
 }
 

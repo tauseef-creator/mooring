@@ -68,79 +68,114 @@ func runKill(args []string) int {
 	if snap.warning != nil {
 		errorf("warning: %v", snap.warning)
 	}
-	if c, ok := snap.containers[port]; ok {
-		return stopContainer(c, port, yes, *timeout)
-	}
-	return stopProcesses(snap.listeners, port, yes, *timeout)
-}
-
-func stopContainer(c containers.Container, port uint16, yes bool, timeout time.Duration) int {
-	what := fmt.Sprintf("%s container %q", c.Endpoint.Runtime, c.Name)
-	if !confirm(fmt.Sprintf("Stop %s on port %d?", what, port), yes) {
+	t, err := findTarget(snap, port)
+	if err != nil {
+		errorf("%v", err)
 		return 1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout+containerAPITimeout)
-	defer cancel()
-	if err := c.Stop(ctx, timeout); err != nil {
-		errorf("stopping %s: %v", what, err)
+	if !confirm(t.question(), yes) {
 		return 1
 	}
-	fmt.Printf("Stopped %s on port %d\n", what, port)
+	msg, err := t.stop(*timeout)
+	if err != nil {
+		errorf("%v", err)
+		return 1
+	}
+	fmt.Println(msg)
 	return 0
 }
 
-func stopProcesses(ls []ports.Listener, port uint16, yes bool, timeout time.Duration) int {
-	var targets []ports.Listener
-	for _, l := range ls {
-		if l.Port == port {
-			targets = append(targets, l)
-		}
-	}
-	if len(targets) == 0 {
-		errorf("nothing is listening on port %d", port)
-		return 1
+// target is whatever listens on a port, ready to be stopped. Both the kill
+// command and the TUI use it.
+type target struct {
+	port      uint16
+	what      string // such as `"npm run dev" (PID 48213)` or `docker container "api"`
+	container *containers.Container
+	pids      []int
+}
+
+// findTarget works out what to stop on port. A port published by a container
+// is stopped through its engine, not by killing the proxy that holds it.
+func findTarget(snap snapshot, port uint16) (target, error) {
+	if c, ok := snap.containers[port]; ok {
+		what := fmt.Sprintf("%s container %q", c.Endpoint.Runtime, c.Name)
+		return target{port: port, what: what, container: &c}, nil
 	}
 
 	var pids []int
 	var names []string
-	for _, t := range targets {
-		if t.PID == 0 {
-			errorf("port %d belongs to a process of user %s that mooring cannot see; run with sudo", port, userName(t.UID))
-			return 1
+	for _, l := range snap.listeners {
+		if l.Port != port {
+			continue
 		}
-		pids = append(pids, t.PID)
-		names = append(names, fmt.Sprintf("%q (PID %d)", truncate(t.Command, maxCommandWidth), t.PID))
+		if l.PID == 0 {
+			return target{}, fmt.Errorf("port %d belongs to a process of user %s that mooring cannot see; run with sudo", port, userName(l.UID))
+		}
+		pids = append(pids, l.PID)
+		names = append(names, fmt.Sprintf("%q (PID %d)", truncate(l.Command, maxCommandWidth), l.PID))
 	}
-	what := strings.Join(names, ", ")
-	if !confirm(fmt.Sprintf("Stop %s on port %d?", what, port), yes) {
-		return 1
+	if len(pids) == 0 {
+		return target{}, fmt.Errorf("nothing is listening on port %d", port)
+	}
+	return target{port: port, what: strings.Join(names, ", "), pids: pids}, nil
+}
+
+func (t target) question() string {
+	return fmt.Sprintf("Stop %s on port %d?", t.what, t.port)
+}
+
+// stop stops the target and returns a message saying what happened.
+func (t target) stop(timeout time.Duration) (string, error) {
+	if t.container != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout+containerAPITimeout)
+		defer cancel()
+		if err := t.container.Stop(ctx, timeout); err != nil {
+			return "", fmt.Errorf("stopping %s: %w", t.what, err)
+		}
+		return fmt.Sprintf("Stopped %s on port %d", t.what, t.port), nil
 	}
 
 	procfs := os.DirFS(procRoot())
-	released := func() bool {
+	// holders returns which of the target's PIDs still listen on the port.
+	holders := func() ([]int, error) {
 		ls, err := ports.List(procfs)
 		if err != nil {
-			return false
+			return nil, err
 		}
-		return !slices.ContainsFunc(ls, func(l ports.Listener) bool {
-			return l.Port == port && slices.Contains(pids, l.PID)
-		})
+		var pids []int
+		for _, l := range ls {
+			if l.Port == t.port && slices.Contains(t.pids, l.PID) {
+				pids = append(pids, l.PID)
+			}
+		}
+		return pids, nil
+	}
+
+	// Time may have passed since the scan, for example while the user read
+	// the prompt. Only signal PIDs that still hold the port, so a PID reused
+	// by an unrelated process in the meantime is never touched.
+	pids, err := holders()
+	if err != nil {
+		return "", err
+	}
+	if len(pids) == 0 {
+		return fmt.Sprintf("%s already released port %d", t.what, t.port), nil
+	}
+	released := func() bool {
+		pids, err := holders()
+		return err == nil && len(pids) == 0
 	}
 	forced, err := terminate(pids, released, timeout)
+	if errors.Is(err, os.ErrPermission) {
+		return "", fmt.Errorf("%w; run with sudo to stop another user's process", err)
+	}
 	if err != nil {
-		if errors.Is(err, os.ErrPermission) {
-			errorf("%v; run with sudo to stop another user's process", err)
-		} else {
-			errorf("%v", err)
-		}
-		return 1
+		return "", err
 	}
 	if forced {
-		fmt.Printf("Killed %s on port %d (it ignored SIGTERM for %s)\n", what, port, timeout)
-	} else {
-		fmt.Printf("Stopped %s on port %d\n", what, port)
+		return fmt.Sprintf("Killed %s on port %d (it ignored SIGTERM for %s)", t.what, t.port, timeout), nil
 	}
-	return 0
+	return fmt.Sprintf("Stopped %s on port %d", t.what, t.port), nil
 }
 
 // terminate sends SIGTERM to each process and waits until done reports true.

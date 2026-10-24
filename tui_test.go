@@ -29,7 +29,7 @@ func testSnapshot(portNums ...uint16) snapshot {
 	return snapshot{listeners: ls}
 }
 
-func key(s string) tea.KeyPressMsg {
+func keyPress(s string) tea.KeyPressMsg {
 	return tea.KeyPressMsg{Code: rune(s[0]), Text: s}
 }
 
@@ -110,7 +110,7 @@ func TestQuitKeys(t *testing.T) {
 		case "ctrl+c":
 			msg = tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
 		default:
-			msg = key(k)
+			msg = keyPress(k)
 		}
 		_, cmd := update(t, newModel(), msg)
 		if cmd == nil {

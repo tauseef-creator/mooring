@@ -20,6 +20,9 @@ the table instead.
 | `/`     | filter: every word must appear in the row (`docker 44`, `main`) |
 | `enter` | keep the filter and go back to the table                      |
 | `esc`   | clear the filter, or quit when there is none                  |
+| `k`     | stop the selected port, after a y/n prompt (like `mooring kill`) |
+| `o`     | open the port in your browser (`http://localhost:PORT`)       |
+| `c`     | copy the port's URL to the clipboard                          |
 | `r`     | refresh now                                                   |
 | `q`     | quit                                                          |
 

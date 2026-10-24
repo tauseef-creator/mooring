@@ -37,6 +37,7 @@ type row struct {
 	Dir    string // full working or compose directory, empty if unknown
 	Branch string // git branch of the project, empty if none
 	Listen string // addresses with the port, such as "0.0.0.0:80, [::]:80"
+	Addrs  []netip.Addr
 
 	// Container is set when a container publishes the port.
 	Container *containers.Container
@@ -53,7 +54,7 @@ func buildRows(snap snapshot, now time.Time) (rows []row, hidden bool) {
 	home, _ := os.UserHomeDir()
 
 	for _, l := range snap.listeners {
-		r := row{Port: l.Port, PID: "-", User: userName(l.UID), Address: joinAddrs(l.Addrs)}
+		r := row{Port: l.Port, PID: "-", User: userName(l.UID), Address: joinAddrs(l.Addrs), Addrs: l.Addrs}
 		command, dir, started := l.Command, l.Cwd, l.Started
 		// Published container ports are held by a proxy process, so describe
 		// the container instead.
