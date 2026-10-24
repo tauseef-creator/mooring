@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/tauseef-creator/mooring/internal/containers"
 	"github.com/tauseef-creator/mooring/internal/project"
 )
@@ -22,6 +24,41 @@ const (
 	projectColumn = 4
 	addressColumn = 6
 )
+
+// shrinkOrder lists the columns that give up width, first to last, when the
+// terminal is too narrow.
+var shrinkOrder = []int{commandColumn, projectColumn, addressColumn}
+
+// minFlexWidth is the narrowest a column in shrinkOrder may become.
+const minFlexWidth = 8
+
+// fitWidths returns the width of each column: its widest cell across lines.
+// When the columns plus overhead (padding or gaps between them) would exceed
+// width, the columns in shrinkOrder give up space, down to minFlexWidth.
+// A width of 0 or less means unlimited.
+func fitWidths(lines [][]string, width, overhead int) []int {
+	widths := make([]int, len(columnTitles))
+	for _, line := range lines {
+		for i, c := range line {
+			widths[i] = max(widths[i], ansi.StringWidth(c))
+		}
+	}
+
+	total := overhead
+	for _, w := range widths {
+		total += w
+	}
+	for _, i := range shrinkOrder {
+		if width <= 0 || total <= width {
+			break
+		}
+		if cut := min(total-width, widths[i]-minFlexWidth); cut > 0 {
+			widths[i] -= cut
+			total -= cut
+		}
+	}
+	return widths
+}
 
 // row is one listening port, ready to display.
 type row struct {

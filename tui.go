@@ -27,10 +27,9 @@ const statusDuration = 4 * time.Second
 
 // Layout constants for the TUI.
 const (
-	headerLines  = 2 // title line and a blank line
-	footerLines  = 2 // blank line and the help line
-	cellPadding  = 2 // the table pads each cell with a space on both sides
-	minFlexWidth = 8 // narrowest a shrinkable column may become
+	headerLines = 2 // title line and a blank line
+	footerLines = 2 // blank line and the help line
+	cellPadding = 2 // the table pads each cell with a space on both sides
 
 	detailsLines  = 6 // details panel: 4 lines of content plus its border
 	panelChrome   = 4 // horizontal space the panel's border and padding take
@@ -39,10 +38,6 @@ const (
 
 // shortIDLen is the container ID length docker ps shows.
 const shortIDLen = 12
-
-// shrinkOrder lists the columns that give up width, first to last, when the
-// terminal is too narrow.
-var shrinkOrder = []int{commandColumn, projectColumn, addressColumn}
 
 var (
 	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
@@ -417,30 +412,11 @@ func (m model) detailsView() string {
 // columns sizes each column to its widest cell. When the total is wider than
 // width, the columns in shrinkOrder give up space, down to minFlexWidth.
 func columns(rows []row, width int) []table.Column {
-	widths := make([]int, len(columnTitles))
-	for i, t := range columnTitles {
-		widths[i] = lipgloss.Width(t)
-	}
+	lines := [][]string{columnTitles}
 	for _, r := range rows {
-		for i, c := range r.cells() {
-			widths[i] = max(widths[i], lipgloss.Width(c))
-		}
+		lines = append(lines, r.cells())
 	}
-
-	total := 0
-	for _, w := range widths {
-		total += w + cellPadding
-	}
-	for _, i := range shrinkOrder {
-		if width <= 0 || total <= width {
-			break
-		}
-		cut := min(total-width, widths[i]-minFlexWidth)
-		if cut > 0 {
-			widths[i] -= cut
-			total -= cut
-		}
-	}
+	widths := fitWidths(lines, width, cellPadding*len(columnTitles))
 
 	cols := make([]table.Column, len(columnTitles))
 	for i, t := range columnTitles {
