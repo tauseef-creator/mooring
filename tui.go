@@ -427,7 +427,10 @@ func columns(rows []row, width int) []table.Column {
 
 func (m model) View() tea.View {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("mooring") + "  " + dimStyle.Render(m.summary()) + "\n")
+	b.WriteString(titleStyle.Render("mooring"))
+	b.WriteString("  ")
+	b.WriteString(dimStyle.Render(m.summary()))
+	b.WriteString("\n")
 	// The second header line holds the filter while it is in use.
 	if m.filtering || m.filter.Value() != "" {
 		b.WriteString(m.filter.View())
@@ -446,7 +449,8 @@ func (m model) View() tea.View {
 	default:
 		b.WriteString(m.table.View())
 		if m.showDetails {
-			b.WriteString("\n" + m.detailsView())
+			b.WriteString("\n")
+			b.WriteString(m.detailsView())
 		}
 	}
 
@@ -469,7 +473,8 @@ func (m model) View() tea.View {
 	if m.width > 0 {
 		footer = lipgloss.NewStyle().MaxWidth(m.width).Render(footer) // never wrap
 	}
-	b.WriteString("\n\n" + footer)
+	b.WriteString("\n\n")
+	b.WriteString(footer)
 
 	v := tea.NewView(b.String())
 	v.AltScreen = true

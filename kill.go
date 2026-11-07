@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -34,6 +35,17 @@ const defaultKillTimeout = 10 * time.Second
 // killPollInterval is how often to check whether the port has been released.
 const killPollInterval = 100 * time.Millisecond
 
+// containerProxyNames are processes that forward a published container port
+// onto the host. Killing them does not stop the container and can disrupt
+// the engine's networking, so mooring refuses unless the engine API named
+// the container.
+var containerProxyNames = map[string]bool{
+	"docker-proxy": true,
+	"rootlessport": true, // Podman rootless port forwarder
+	"pasta":        true,
+	"slirp4netns":  true,
+}
+
 func runKill(args []string) int {
 	flags := flag.NewFlagSet("kill", flag.ContinueOnError)
 	var yes bool
@@ -52,6 +64,10 @@ func runKill(args []string) int {
 	}
 	if flags.NArg() != 1 {
 		flags.Usage()
+		return 2
+	}
+	if *timeout <= 0 {
+		errorf("invalid -timeout %v: want a positive duration", *timeout)
 		return 2
 	}
 	port, err := parsePort(flags.Arg(0))
@@ -111,6 +127,9 @@ func findTarget(snap snapshot, port uint16) (target, error) {
 		if l.PID == 0 {
 			return target{}, fmt.Errorf("port %d belongs to a process of user %s that mooring cannot see; run with sudo", port, userName(l.UID))
 		}
+		if isContainerProxy(l.Command) {
+			return target{}, fmt.Errorf("port %d is held by %q, a container port forwarder; mooring needs the engine API to stop the container (check docker group membership, DOCKER_HOST or CONTAINER_HOST)", port, truncate(l.Command, maxCommandWidth))
+		}
 		pids = append(pids, l.PID)
 		names = append(names, fmt.Sprintf("%q (PID %d)", truncate(l.Command, maxCommandWidth), l.PID))
 	}
@@ -118,6 +137,16 @@ func findTarget(snap snapshot, port uint16) (target, error) {
 		return target{}, fmt.Errorf("nothing is listening on port %d", port)
 	}
 	return target{port: port, what: strings.Join(names, ", "), pids: pids}, nil
+}
+
+// isContainerProxy reports whether command is a known Docker/Podman port
+// forwarder whose process must not be killed directly.
+func isContainerProxy(command string) bool {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	return containerProxyNames[path.Base(fields[0])]
 }
 
 func (t target) question() string {
@@ -151,21 +180,35 @@ func (t target) stop(timeout time.Duration) (string, error) {
 		return pids, nil
 	}
 
-	// Time may have passed since the scan, for example while the user read
-	// the prompt. Only signal PIDs that still hold the port, so a PID reused
-	// by an unrelated process in the meantime is never touched.
-	pids, err := holders()
+	// Pin each PID with a process handle before re-checking the port. On
+	// Linux the handle is a pidfd: signals go to that process identity, so a
+	// numeric PID reused by an unrelated process after this point is never
+	// hit. Opening the handle after the re-check would pin the new occupant
+	// instead.
+	procs, err := pinProcesses(t.pids)
 	if err != nil {
 		return "", err
 	}
-	if len(pids) == 0 {
+	defer releaseProcesses(procs)
+
+	holding, err := holders()
+	if err != nil {
+		return "", err
+	}
+	var live []*os.Process
+	for _, p := range procs {
+		if slices.Contains(holding, p.Pid) {
+			live = append(live, p)
+		}
+	}
+	if len(live) == 0 {
 		return fmt.Sprintf("%s already released port %d", t.what, t.port), nil
 	}
 	released := func() bool {
 		pids, err := holders()
 		return err == nil && len(pids) == 0
 	}
-	forced, err := terminate(pids, released, timeout)
+	forced, err := terminate(live, released, timeout)
 	if errors.Is(err, os.ErrPermission) {
 		return "", fmt.Errorf("%w; run with sudo to stop another user's process", err)
 	}
@@ -178,21 +221,30 @@ func (t target) stop(timeout time.Duration) (string, error) {
 	return fmt.Sprintf("Stopped %s on port %d", t.what, t.port), nil
 }
 
-// terminate sends SIGTERM to each process and waits until done reports true.
-// Processes still running after timeout get SIGKILL. It reports whether
-// SIGKILL was needed.
-func terminate(pids []int, done func() bool, timeout time.Duration) (forced bool, err error) {
-	var procs []*os.Process
+// pinProcesses opens a handle for each PID. On Linux 5.3+ this is a pidfd.
+func pinProcesses(pids []int) ([]*os.Process, error) {
+	procs := make([]*os.Process, 0, len(pids))
 	for _, pid := range pids {
-		// On Linux this holds a pidfd, so a PID reused by a new process is
-		// never signaled by mistake.
 		p, err := os.FindProcess(pid)
 		if err != nil {
-			return false, err
+			releaseProcesses(procs)
+			return nil, err
 		}
-		defer p.Release()
 		procs = append(procs, p)
 	}
+	return procs, nil
+}
+
+func releaseProcesses(procs []*os.Process) {
+	for _, p := range procs {
+		_ = p.Release()
+	}
+}
+
+// terminate sends SIGTERM to each process and waits until done reports true.
+// Processes still running after timeout get SIGKILL. It reports whether
+// SIGKILL was needed. The caller owns procs and must Release them.
+func terminate(procs []*os.Process, done func() bool, timeout time.Duration) (forced bool, err error) {
 	signal := func(sig syscall.Signal) error {
 		for _, p := range procs {
 			if err := p.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) {
