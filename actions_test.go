@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/netip"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -92,6 +93,9 @@ func TestKillPromptCancel(t *testing.T) {
 // says the child holds port 3000, but by the time the user confirms, nothing
 // with that PID listens there. The stop must not signal it.
 func TestKillRechecksBeforeSignaling(t *testing.T) {
+	if _, err := os.Stat("/proc/net/tcp"); err != nil {
+		t.Skip("requires Linux procfs")
+	}
 	child := startSleep(t)
 	m := killModel(t, child.Process.Pid)
 
